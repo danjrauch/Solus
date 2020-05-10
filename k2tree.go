@@ -1,26 +1,14 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"math/bits"
 	"sort"
 
 	"github.com/golang-collections/collections/queue"
 	"github.com/golang-collections/go-datastructures/bitarray"
+	"github.com/hillbig/rsdic"
 )
-
-type K2Tree interface {
-}
-
-type k2Tree struct {
-	tree   bitarray.BitArray
-	leaves bitarray.BitArray
-}
-
-type k2TreeNode struct {
-	children []*k2TreeNode
-	value    bool
-}
 
 func prevPowerOf2(n uint) int {
 	var u uint = 0
@@ -41,6 +29,76 @@ func nextPowerOf2(n uint) int {
 		u++
 	}
 	return 1 << u
+}
+
+/*
+	The work for these structures comes from the work of
+	Brisaboa et al. Some of the paper titles are listed:
+
+	"k2-trees for Compact Web Graph Representation"
+
+	We can build a k-squared tree from adjacency lists by
+	recursive descent using the theoretical structure below.
+
+	Quadrant Ordering
+	_____________
+	|     |     |
+	|  0  |  1  |
+	|     |     |
+	-------------
+	|     |     |
+	|  2  |  3  |
+	|     |     |
+	-------------
+
+	We are input a list of adjacency lists that represent a graph.
+	For each edge in the graph, we build a path in the k2-tree.
+	Starting from the root, we insert k2-tree nodes based on
+	the position of the edge in the graph's adjacency matrix.
+	For example, if the edge in question lies in quadrant 2 of
+	the adjacency matrix, we insert a k2-tree node into the
+	children list for the root node if it doesn't exist already.
+	Continue recursively into the found quadrant until the search
+	space is one cell of the adjacency matrix.
+*/
+
+// K2Tree represents a k-squared tree
+type K2Tree interface {
+	GetChild(x int, c int) (bool, error)
+}
+
+type k2Tree struct {
+	tree      bitarray.BitArray
+	leaves    bitarray.BitArray
+	lenTree   int
+	lenLeaves int
+	rank      *rsdic.RSDic
+}
+
+type k2TreeNode struct {
+	children []*k2TreeNode
+	value    bool
+	level    int
+}
+
+// GetChild gets the cth child of node at pos x in tree
+func (kt *k2Tree) GetChild(x int, c int) (bool, error) {
+	n, err := kt.tree.GetBit(uint64(x))
+	if err != nil {
+		return false, err
+	}
+
+	if !n {
+		return false, errors.New("Bit at pos x is not set")
+	}
+
+	pos := (int(kt.rank.Rank(uint64(x), true))+1)*4 + c
+
+	if pos < kt.lenTree {
+		return kt.tree.GetBit(uint64(pos))
+	}
+
+	return kt.leaves.GetBit(uint64(pos - kt.lenTree))
 }
 
 func addK2TreeNode(root *k2TreeNode, row int, col int, n int) {
@@ -68,11 +126,11 @@ func addK2TreeNode(root *k2TreeNode, row int, col int, n int) {
 		k *= 2
 	}
 	for _, v := range path {
-		if root.value == false || root.children == nil {
-			root.value = true
+		root.value = true
+		if root.children == nil {
 			root.children = make([]*k2TreeNode, 4)
 			for i := range root.children {
-				root.children[i] = &k2TreeNode{value: false}
+				root.children[i] = &k2TreeNode{value: false, level: root.level + 1}
 			}
 		}
 		root.children[v].value = true
@@ -82,7 +140,7 @@ func addK2TreeNode(root *k2TreeNode, row int, col int, n int) {
 
 func newK2Tree(graph [][]int) *k2Tree {
 	nNodes := len(graph)
-	root := k2TreeNode{value: true}
+	root := k2TreeNode{value: true, level: 0}
 	cursors := make([]int, nNodes)
 	for _, row := range graph {
 		sort.Ints(row)
@@ -92,7 +150,6 @@ func newK2Tree(graph [][]int) *k2Tree {
 		for j := 0; j < nNodes; j++ {
 			if cursors[i] < nEdges {
 				if graph[i][cursors[i]] == j {
-					// TODO build node in tree
 					addK2TreeNode(&root, i, j, nextPowerOf2(uint(nNodes)))
 					cursors[i]++
 				}
@@ -100,18 +157,64 @@ func newK2Tree(graph [][]int) *k2Tree {
 		}
 	}
 
+	maxLevel := 0
+
 	qu := queue.New()
 	qu.Enqueue(&root)
 	for qu.Len() > 0 {
 		var node *k2TreeNode = qu.Dequeue().(*k2TreeNode)
-		fmt.Print(node.value, " ")
+		if node.level > maxLevel {
+			maxLevel = node.level
+		}
+		// fmt.Print(node.level, " ", node.value, " ")
 		for _, child := range node.children {
 			qu.Enqueue(child)
 		}
 	}
-	fmt.Println()
+	// fmt.Println()
 
-	return &k2Tree{}
+	var tree []bool
+	var leaves []bool
+	var rank *rsdic.RSDic = rsdic.New()
+
+	qu.Enqueue(&root)
+	for qu.Len() > 0 {
+		var node *k2TreeNode = qu.Dequeue().(*k2TreeNode)
+		if node.level != maxLevel && node.level != 0 {
+			tree = append(tree, node.value)
+			rank.PushBack(node.value)
+		} else if node.level == maxLevel {
+			leaves = append(leaves, node.value)
+		}
+		for _, child := range node.children {
+			qu.Enqueue(child)
+		}
+	}
+
+	// fmt.Println(tree)
+	// fmt.Println(leaves)
+
+	ktree := &k2Tree{
+		tree:      bitarray.NewBitArray(uint64(len(tree))),
+		leaves:    bitarray.NewBitArray(uint64(len(leaves))),
+		lenTree:   len(tree),
+		lenLeaves: len(leaves),
+		rank:      rank,
+	}
+
+	for i, v := range tree {
+		if v {
+			ktree.tree.SetBit(uint64(i))
+		}
+	}
+
+	for i, v := range leaves {
+		if v {
+			ktree.leaves.SetBit(uint64(i))
+		}
+	}
+
+	return ktree
 }
 
 // NewK2Tree creates a new K2Tree
